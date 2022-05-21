@@ -2,13 +2,13 @@ const express = require("express");
 const app = express();
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const query = require("express/lib/middleware/query");
 var nodemailer = require("nodemailer");
 var sgTransport = require("nodemailer-sendgrid-transport");
 require("dotenv").config();
 const port = process.env.PORT || 5000;
-
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 // middleware
 app.use(cors());
 app.use(express.json());
@@ -20,23 +20,6 @@ const emailSenderOptions = {
   },
 };
 const emailClient = nodemailer.createTransport(sgTransport(emailSenderOptions));
-const sendAppointmentEmail = (patientEmail, name, date, slot) => {
-  var email = {
-    from: process.env.EMAIL_SENDER,
-    to: patientEmail,
-    subject: `${name}`,
-    text: `${date}`,
-    html: `<b>Hello mr ${name} at ${slot}</b>`,
-  };
-  emailClient.sendMail(email, function (err, info) {
-    if (err) {
-      console.log("errors", err);
-      console.log("INFO", info);
-    } else {
-      console.log("Message sent: " + info.response);
-    }
-  });
-};
 
 const uri =
   "mongodb+srv://doctors_portal_admin:23vkZrrEIV6b6OuS@cluster0.dndku.mongodb.net/myFirstDatabase?retryWrites=true&w=majority";
@@ -66,6 +49,7 @@ async function run() {
     const bookingCollection = client.db("doctorsPortal").collection("Booking");
     const usersCollection = client.db("doctorsPortal").collection("Users");
     const doctorCollection = client.db("doctorsPortal").collection("doctors");
+    const paymentCollection = client.db("doctorsPortal").collection("payments");
 
     // get all services for appointment page
     app.get("/service", async (req, res) => {
@@ -80,6 +64,20 @@ async function run() {
     app.get("/user", verfifyJWT, async (req, res) => {
       const users = await usersCollection.find().toArray();
       res.send(users);
+    });
+
+    app.post("/create-payment-intent", verfifyJWT, async (req, res) => {
+      const service = req.body;
+      const price = service.price;
+      const amount = price * 100;
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount,
+        currency: "usd",
+        payment_method_types: ["card"],
+      });
+      res.send({
+        clientSecret: paymentIntent.client_secret,
+      });
     });
 
     const verifyAdmin = async (req, res, next) => {
@@ -184,6 +182,27 @@ async function run() {
       return res.send({ success: true, result });
     });
 
+    app.get("/booking/:id", verfifyJWT, async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: ObjectId(id) };
+      const booking = await bookingCollection.findOne(query);
+      res.send(booking);
+    });
+    app.patch("/booking/:id", verfifyJWT, async (req, res) => {
+      const id = req.params.id;
+      const payment = req.body;
+      const query = { _id: ObjectId(id) };
+      const option = { upsert: true };
+      const upDoc = {
+        $set: { paid: true, transactionId: payment.transactionId },
+      };
+      const updatedBooking = await bookingCollection.updateOne(
+        query,
+        upDoc
+      );
+      const result = await paymentCollection.insertOne(payment);
+      res.send(upDoc);
+    });
     app.post("/doctor", verfifyJWT, verifyAdmin, async (req, res) => {
       const doctor = req.body;
       const result = await doctorCollection.insertOne(doctor);
